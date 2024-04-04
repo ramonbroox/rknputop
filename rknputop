@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+
+# rknputop
+# Copyright (C) 2024 Broox Technologies Ltd.
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+#      but WITHOUT ANY WARRANTY; without even the implied warranty of
+#      MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#     GNU General Public License for more details.
+# 
+#      You should have received a copy of the GNU General Public License
+#      along with this program.  If not, see <http://www.gnu.org/licenses/>.os
+
+import sys
+import re
+import time
+import threading
+import queue
+
+try:
+    import plotext as plt
+except:
+    print("Install plotext with `pip3 install plotext`")
+    sys.exit(-1)
+
+def readload():
+    rkload = None
+    try:
+        with open("/sys/kernel/debug/rknpu/load", "r") as f:
+            rkload = f.read()
+    except:
+        print("Cannot read /sys/kernel/debug/rknpu/load. Run with `sudo`")
+        sys.exit(-2)
+    return rkload
+
+def parseload(txt):
+    res = []
+    items = re.findall("Core([0-9]+):\s*([0-9]+)%",txt)
+    for core,pct in items:
+        res.append(int(pct))
+    return res
+
+def _kget_thread(q):
+    while True:
+        q.put(sys.stdin.read(1))
+
+if __name__ == "__main__":
+
+    rkload = readload()
+    if rkload is None or len(rkload) == 0:
+        print("Cannot read anything in /sys/kernel/debug/rknpu/load. Run with `sudo`")
+        sys.exit(-2)
+
+    pts = parseload(rkload)
+    n_pts = len(pts)
+
+    MAX_SAMPLES=100
+    samples = []
+
+    input_queue =  queue.Queue()
+    input_thread = threading.Thread(target=_kget_thread, args=(input_queue,))
+    input_thread.daemon = True
+    input_thread.start()
+    while True:
+        loads = parseload(readload())
+        samples.append(loads)
+        if len(samples) > MAX_SAMPLES:
+            samples.pop(0)
+        plt.clf()
+        plt.ylim(lower=0, upper=100)
+        for k in range(n_pts):
+            plt.plot([s[k] for s in samples], label=f"Core {k}")
+        plt.show()
+        plt.sleep(1)
+        if not input_queue.empty():
+            k = input_queue.get()
+            if k == 'Q' or k == 'q':
+                sys.exit(0)
+
