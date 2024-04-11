@@ -5,7 +5,7 @@ Simple top-like script for Rockhip NPUs on Linux
 ### Quick Install 
 Debian/Ubuntu only (requires apt):
 
-`curl https://raw.githubusercontent.com/ramonbroox/rknputop/main/rknputop | sudo bash`
+`curl https://raw.githubusercontent.com/ramonbroox/rknputop/main/install.sh | sudo bash`
 
 ### Manual Install
 Required:
