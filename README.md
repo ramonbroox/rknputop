@@ -16,7 +16,7 @@ Then download (for example with `wget`)
 `wget https://raw.githubusercontent.com/ramonbroox/rknputop/main/rknputop`
 
 ## Running
-If you followed quick install, just enter `rknutop` on your shell
+If you followed quick install, just enter `rknputop` on your shell
 
 ### Manual
 `chmod +x rknputop`
