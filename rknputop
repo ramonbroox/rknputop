@@ -12,7 +12,7 @@
 #      but WITHOUT ANY WARRANTY; without even the implied warranty of
 #      MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #     GNU General Public License for more details.
-# 
+#
 #      You should have received a copy of the GNU General Public License
 #      along with this program.  If not, see <http://www.gnu.org/licenses/>.os
 
@@ -21,12 +21,49 @@ import re
 import time
 import threading
 import queue
+import math
+import tty
+import os
+import termios
+import subprocess
 
 try:
     import plotext as plt
 except:
     print("Install plotext with `pip3 install plotext`")
     sys.exit(-1)
+try:
+    import psutil
+except:
+    print("Install psutil with `pip3 install psutil`")
+    sys.exit(-1)
+
+
+def getkey():
+    old_settings = termios.tcgetattr(sys.stdin)
+    tty.setcbreak(sys.stdin.fileno())
+    try:
+        while True:
+            b = os.read(sys.stdin.fileno(), 3).decode()
+            if len(b) == 3:
+                k = ord(b[2])
+            else:
+                k = ord(b)
+            key_mapping = {
+                127: "backspace",
+                10: "return",
+                32: "space",
+                9: "tab",
+                27: "esc",
+                65: "up",
+                66: "down",
+                67: "right",
+                68: "left",
+            }
+            return key_mapping.get(k, chr(k))
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+
 
 def readload():
     rkload = None
@@ -38,16 +75,55 @@ def readload():
         sys.exit(-2)
     return rkload
 
+def readkver():
+    rkver = ":unknown"
+    try:
+        with open("/sys/kernel/debug/rknpu/version", "r") as f:
+            rkver = f.read()
+    except:
+        print("Cannot read /sys/kernel/debug/rknpu/load. Run with `sudo`")
+        sys.exit(-2)
+    return rkver.split(":")[1]
+
+def readlibver():
+    ver = ""
+    try:
+        v = subprocess.check_output('strings /usr/lib/librknnrt.so | grep "librknnrt version:"', shell=True)
+        v = v.decode('ascii').strip()
+        ver = v.replace('librknnrt version: ','')
+        ver = v.replace('(',"\n").replace(")","")
+    except:
+        pass
+    return ver
+
+
 def parseload(txt):
     res = []
-    items = re.findall("Core([0-9]+):\s*([0-9]+)%",txt)
-    for core,pct in items:
+    items = re.findall("Core([0-9]+):\s*([0-9]+)%", txt)
+    for core, pct in items:
         res.append(int(pct))
     return res
 
+
 def _kget_thread(q):
     while True:
-        q.put(sys.stdin.read(1))
+        q.put(getkey())
+
+
+def tempbars():
+    labels = []
+    temps = []
+    tops = []
+
+    for k, v in psutil.sensors_temperatures().items():
+        if k.startswith("test"):
+            continue
+        labels.append(k.replace("_thermal", ""))
+        temps.append(math.floor(v[0].current))
+        tops.append(math.floor(v[0].high))
+
+    return labels, temps, tops
+
 
 if __name__ == "__main__":
 
@@ -55,14 +131,15 @@ if __name__ == "__main__":
     if rkload is None or len(rkload) == 0:
         print("Cannot read anything in /sys/kernel/debug/rknpu/load. Run with `sudo`")
         sys.exit(-2)
-
+    rkver = readkver()
+    libver = readlibver()
     pts = parseload(rkload)
     n_pts = len(pts)
 
-    MAX_SAMPLES=100
+    MAX_SAMPLES = 100
     samples = []
 
-    input_queue =  queue.Queue()
+    input_queue = queue.Queue()
     input_thread = threading.Thread(target=_kget_thread, args=(input_queue,))
     input_thread.daemon = True
     input_thread.start()
@@ -71,14 +148,45 @@ if __name__ == "__main__":
         samples.append(loads)
         if len(samples) > MAX_SAMPLES:
             samples.pop(0)
+
+        cpus = psutil.cpu_percent(percpu=True)
+        labels, temps, tops = tempbars()
+
+        mem = psutil.virtual_memory().percent
+        swp = psutil.swap_memory().percent
+
         plt.clf()
-        plt.ylim(lower=0, upper=100)
+        plt.subplots(2, 2)
+
+        plt.subplot(1, 1).title(f"NPU Load")
+        plt.subplot(1, 1).ylim(lower=0, upper=100)
         for k in range(n_pts):
-            plt.plot([s[k] for s in samples], label=f"Core {k}")
+            plt.subplot(1, 1).plot([s[k] for s in samples], label=f"Core {k}")
+
+        plt.subplot(1, 2).title("CPU Load")
+        plt.subplot(1, 2).ylim(lower=0, upper=100)
+        plt.subplot(1, 2).bar([str(i) for i in range(len(cpus))], cpus, width=1 / 5)
+        [plt.subplot(1,2).text(f"{cpus[i]}%", x=i+1, y=cpus[i]+1.5, alignment="center") for i in range(len(cpus))]
+
+        plt.subplot(2, 1).title("Thermals")
+        plt.subplot(2, 1).stacked_bar(
+            labels, [temps, tops], orientation="h", width=1 / 5
+        )
+        [plt.subplot(2,1).text(f"{temps[i]}ºC",x=1,y=i+1) for i in range(len(temps))]
+        plt.subplot(2, 2)
+        plt.subplot(2, 2).subplots(2,1)
+        plt.subplot(2, 2).subplot(1,1).title("Memory")
+        plt.subplot(2,2).subplot(1,1).stacked_bar(
+            ["Memory", "Swap"],
+            [[mem, swp], [100 - mem, 100 - swp]],
+            orientation="h",
+            width=1/5,
+        )
+
+        plt.subplot(2,2).subplot(2,1).indicator(f"librknnrt.so  {libver}\nKenrnel mod: {rkver}")
         plt.show()
         plt.sleep(1)
         if not input_queue.empty():
             k = input_queue.get()
-            if k == 'Q' or k == 'q':
+            if k == "Q" or k == "q" or k == "esc":
                 sys.exit(0)
-
