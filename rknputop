@@ -26,6 +26,7 @@ import tty
 import os
 import termios
 import subprocess
+import optparse
 
 try:
     import plotext as plt
@@ -75,6 +76,7 @@ def readload():
         sys.exit(-2)
     return rkload
 
+
 def readkver():
     rkver = ":unknown"
     try:
@@ -85,13 +87,16 @@ def readkver():
         sys.exit(-2)
     return rkver.split(":")[1]
 
+
 def readlibver():
     ver = ""
     try:
-        v = subprocess.check_output('strings /usr/lib/librknnrt.so | grep "librknnrt version:"', shell=True)
-        v = v.decode('ascii').strip()
-        ver = v.replace('librknnrt version: ','')
-        ver = v.replace('(',"\n").replace(")","")
+        v = subprocess.check_output(
+            'strings /usr/lib/librknnrt.so | grep "librknnrt version:"', shell=True
+        )
+        v = v.decode("ascii").strip()
+        ver = v.replace("librknnrt version: ", "")
+        ver = v.replace("(", "\n").replace(")", "")
     except:
         pass
     return ver
@@ -125,12 +130,49 @@ def tempbars():
     return labels, temps, tops
 
 
+def plot_npu_lines(plt, n_pts, samples):
+    plt.title(f"NPU Load")
+    plt.ylim(lower=0, upper=100)
+    for k in range(n_pts):
+        plt.plot([s[k] for s in samples], label=f"Core {k}")
+
+
+def plot_npu_bars(plt, n_pts, samples):
+    plt.title(f"NPU Load")
+    plt.ylim(lower=0, upper=100)
+    bars = samples[-1]
+    plt.bar([str(i) for i in range(len(bars))], bars, width=1 / 5)
+    [
+        plt.text(f"{bars[i]}%", x=i + 1, y=bars[i] + 1.5, alignment="center")
+        for i in range(len(bars))
+    ]
+
+
 if __name__ == "__main__":
+    parser = optparse.OptionParser("Show different NPU/CPU stats")
+    parser.add_option(
+        "-n",
+        "--npu-only",
+        dest="npuonly",
+        default=False,
+        help="Only show the NPU load",
+        action="store_true",
+    )
+    parser.add_option(
+        "-b",
+        "--npu-bars",
+        dest="npubars",
+        default=False,
+        action="store_true",
+        help="Show the NPU with bars instead of lines",
+    )
+    opts, _ = parser.parse_args()
 
     rkload = readload()
     if rkload is None or len(rkload) == 0:
         print("Cannot read anything in /sys/kernel/debug/rknpu/load. Run with `sudo`")
         sys.exit(-2)
+
     rkver = readkver()
     libver = readlibver()
     pts = parseload(rkload)
@@ -143,49 +185,68 @@ if __name__ == "__main__":
     input_thread = threading.Thread(target=_kget_thread, args=(input_queue,))
     input_thread.daemon = True
     input_thread.start()
+
     while True:
         loads = parseload(readload())
         samples.append(loads)
         if len(samples) > MAX_SAMPLES:
             samples.pop(0)
 
-        cpus = psutil.cpu_percent(percpu=True)
-        labels, temps, tops = tempbars()
-
-        mem = psutil.virtual_memory().percent
-        swp = psutil.swap_memory().percent
-
         plt.clf()
-        plt.subplots(2, 2)
 
-        plt.subplot(1, 1).title(f"NPU Load")
-        plt.subplot(1, 1).ylim(lower=0, upper=100)
-        for k in range(n_pts):
-            plt.subplot(1, 1).plot([s[k] for s in samples], label=f"Core {k}")
+        if opts.npuonly:
+            if opts.npubars:
+                plot_npu_bars(plt, n_pts, samples)
+            else:
+                plot_npu_lines(plt, n_pts, samples)
+        else:
+            plt.subplots(2, 2)
+            if opts.npubars:
+                plot_npu_bars(plt.subplot(1, 1), n_pts, samples)
+            else:
+                plot_npu_lines(plt.subplot(1, 1), n_pts, samples)
+            # CPU Cores
+            cpus = psutil.cpu_percent(percpu=True)
+            plt.subplot(1, 2).title("CPU Load per core")
+            plt.subplot(1, 2).ylim(lower=0, upper=100)
+            plt.subplot(1, 2).bar([str(i) for i in range(len(cpus))], cpus, width=1 / 5)
+            [
+                plt.subplot(1, 2).text(
+                    f"{cpus[i]}%", x=i + 1, y=cpus[i] + 1.5, alignment="center"
+                )
+                for i in range(len(cpus))
+            ]
 
-        plt.subplot(1, 2).title("CPU Load")
-        plt.subplot(1, 2).ylim(lower=0, upper=100)
-        plt.subplot(1, 2).bar([str(i) for i in range(len(cpus))], cpus, width=1 / 5)
-        [plt.subplot(1,2).text(f"{cpus[i]}%", x=i+1, y=cpus[i]+1.5, alignment="center") for i in range(len(cpus))]
+            # Thermals
+            labels, temps, tops = tempbars()
+            plt.subplot(2, 1).title("Thermals")
+            plt.subplot(2, 1).stacked_bar(
+                labels, [temps, tops], orientation="h", width=1 / 5
+            )
+            [
+                plt.subplot(2, 1).text(f"{temps[i]}ºC", x=1, y=i + 1)
+                for i in range(len(temps))
+            ]
+            plt.subplot(2, 2).subplots(2, 1)
 
-        plt.subplot(2, 1).title("Thermals")
-        plt.subplot(2, 1).stacked_bar(
-            labels, [temps, tops], orientation="h", width=1 / 5
-        )
-        [plt.subplot(2,1).text(f"{temps[i]}ºC",x=1,y=i+1) for i in range(len(temps))]
-        plt.subplot(2, 2)
-        plt.subplot(2, 2).subplots(2,1)
-        plt.subplot(2, 2).subplot(1,1).title("Memory")
-        plt.subplot(2,2).subplot(1,1).stacked_bar(
-            ["Memory", "Swap"],
-            [[mem, swp], [100 - mem, 100 - swp]],
-            orientation="h",
-            width=1/5,
-        )
+            # Memory
+            mem = psutil.virtual_memory().percent
+            swp = psutil.swap_memory().percent
+            plt.subplot(2, 2).subplot(1, 1).title("Memory")
+            plt.subplot(2, 2).subplot(1, 1).stacked_bar(
+                ["Memory", "Swap"],
+                [[mem, swp], [100 - mem, 100 - swp]],
+                orientation="h",
+                width=1 / 5,
+            )
+            # Versions
+            plt.subplot(2, 2).subplot(2, 1).indicator(
+                f"librknnrt.so  {libver}\nKenrnel mod: {rkver}"
+            )
 
-        plt.subplot(2,2).subplot(2,1).indicator(f"librknnrt.so  {libver}\nKenrnel mod: {rkver}")
         plt.show()
         plt.sleep(1)
+
         if not input_queue.empty():
             k = input_queue.get()
             if k == "Q" or k == "q" or k == "esc":
