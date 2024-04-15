@@ -36,7 +36,7 @@ Options:
   -h, --help      show this help message and exit
   -n, --npu-only  Only show the NPU load
   -b, --npu-bars  Show the NPU with bars instead of lines
-``     
+```
 
 ## Screenshots
 
