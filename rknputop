@@ -123,6 +123,10 @@ def tempbars():
     for k, v in psutil.sensors_temperatures().items():
         if k.startswith("test"):
             continue
+        if len(v) == 0:
+            continue
+        if v[0].current is None or v[0].high is None:
+            continue
         labels.append(k.replace("_thermal", ""))
         temps.append(math.floor(v[0].current))
         tops.append(math.floor(v[0].high))
