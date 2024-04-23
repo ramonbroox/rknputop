@@ -245,7 +245,7 @@ if __name__ == "__main__":
             )
             # Versions
             plt.subplot(2, 2).subplot(2, 1).indicator(
-                f"librknnrt.so  {libver}\nKenrnel mod: {rkver}"
+                f"librknnrt.so  {libver}\nKernel mod: {rkver}"
             )
 
         plt.show()
