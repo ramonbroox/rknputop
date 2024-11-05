@@ -76,6 +76,42 @@ def readload():
         sys.exit(-2)
     return rkload
 
+def readrgaload():
+    """
+    num of scheduler = 3
+================= load ==================
+scheduler[0]: rga3_core0
+         load = 0%
+-----------------------------------
+scheduler[1]: rga3_core1
+         load = 0%
+-----------------------------------
+scheduler[2]: rga2
+         load = 0%
+-----------------------------------
+
+"""
+    rgaload = {}
+    try:
+        with open("/sys/kernel/debug/rkrga/load", "r") as f:
+            lines = f.readlines()
+            csched = ""
+            for line in lines:
+                if "-" in line or "= load =" in line:
+                    continue
+                line = line.strip()
+                if line.startswith("num of scheduler ="):
+                    sc = int(line.split("=")[1])
+                elif line.startswith("scheduler"):
+                    csched = line.split(":")[1].strip()
+                elif line.startswith("load ="):
+                    l = line.split("=")[1].replace("%","").strip()
+                    rgaload[csched] = float(l)
+    except:
+        print("Cannot read /sys/kernel/debug/rkrga/load Run with `sudo`")
+        sys.exit(-2)
+    return sc, rgaload
+
 
 def readkver():
     rkver = ":unknown"
@@ -94,12 +130,22 @@ def readlibver():
         v = subprocess.check_output(
             'strings /usr/lib/librknnrt.so | grep "librknnrt version:"', shell=True
         )
-        v = v.decode("ascii").strip()
-        ver = v.replace("librknnrt version: ", "")
-        ver = v.replace("(", "\n").replace(")", "")
+        ver = v.decode("ascii").strip()
+        ver = ver.replace("librknnrt version: ", "")
+        ver = ver.replace("(", "\n").replace(")", "")
     except:
         pass
     return ver
+
+def readrgaver():
+    rgaver = ""
+    try:
+        with open("/sys/kernel/debug/rkrga/driver_version", "r") as f:
+            rgaver = f.read()
+    except:
+        print("Cannot read /sys/kernel/debug/rkrga/driver_version. Run with `sudo`")
+        sys.exit(-2)
+    return rgaver.split(":")[1] 
 
 
 def parseload(txt):
@@ -151,6 +197,19 @@ def plot_npu_bars(plt, n_pts, samples):
         for i in range(len(bars))
     ]
 
+def plot_npu_rga_bars(plt, n_pts, samples, rgaload):
+    plt.title(f"NPU/RGA Load")
+    bars = samples[-1]
+    labels = [f"NPU{i}" for i in range(len(bars))]
+    labels += list(rgaload.keys())
+    bars += list(rgaload.values())
+    tops = [100.0 for _ in bars] 
+    plt.stacked_bar(labels, [bars, tops], width=1 / 5, orientation='h')
+    [
+        plt.text(f"{bars[i]}%", x=18, y=i+1, alignment="center")
+        for i in range(len(bars))
+    ]
+
 
 if __name__ == "__main__":
     parser = optparse.OptionParser("Show different NPU/CPU stats")
@@ -170,6 +229,14 @@ if __name__ == "__main__":
         action="store_true",
         help="Show the NPU with bars instead of lines",
     )
+    parser.add_option(
+        "-r",
+        "--rga",
+        dest="rgaload",
+        default=False,
+        action="store_true",
+        help="Show the RGA load",
+    )
     opts, _ = parser.parse_args()
 
     rkload = readload()
@@ -177,8 +244,9 @@ if __name__ == "__main__":
         print("Cannot read anything in /sys/kernel/debug/rknpu/load. Run with `sudo`")
         sys.exit(-2)
 
-    rkver = readkver()
-    libver = readlibver()
+    rkver = readkver().strip()
+    libver = readlibver().strip()
+    rgaver = readrgaver().strip()
     pts = parseload(rkload)
     n_pts = len(pts)
 
@@ -195,7 +263,6 @@ if __name__ == "__main__":
         samples.append(loads)
         if len(samples) > MAX_SAMPLES:
             samples.pop(0)
-
         plt.clf()
 
         if opts.npuonly:
@@ -205,10 +272,15 @@ if __name__ == "__main__":
                 plot_npu_lines(plt, n_pts, samples)
         else:
             plt.subplots(2, 2)
-            if opts.npubars:
-                plot_npu_bars(plt.subplot(1, 1), n_pts, samples)
+            topper = plt.subplot(1,1)
+            if opts.rgaload:
+                _, rgal = readrgaload()
+                plot_npu_rga_bars(topper, n_pts, samples, rgal) 
+            elif opts.npubars:
+                plot_npu_bars(topper, n_pts, samples)
             else:
-                plot_npu_lines(plt.subplot(1, 1), n_pts, samples)
+                plot_npu_lines(topper, n_pts, samples)
+
             # CPU Cores
             cpus = psutil.cpu_percent(percpu=True)
             plt.subplot(1, 2).title("CPU Load per core")
@@ -228,7 +300,7 @@ if __name__ == "__main__":
                 labels, [temps, tops], orientation="h", width=1 / 5
             )
             [
-                plt.subplot(2, 1).text(f"{temps[i]}ºC", x=1, y=i + 1)
+                plt.subplot(2, 1).text(f"{temps[i]}ºC", x=18, y=i + 1)
                 for i in range(len(temps))
             ]
             plt.subplot(2, 2).subplots(2, 1)
@@ -245,7 +317,7 @@ if __name__ == "__main__":
             )
             # Versions
             plt.subplot(2, 2).subplot(2, 1).indicator(
-                f"librknnrt.so  {libver}\nKernel mod: {rkver}"
+                    f"librknnrt: {libver}\nKmod: {rkver} RGA: {rgaver}" 
             )
 
         plt.show()
