@@ -1,0 +1,413 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+import re
+import psutil
+import math
+import time
+import termios
+import tty
+import threading
+import queue
+import subprocess
+from rich.live import Live
+from rich.panel import Panel
+from rich.console import Group
+from rich.progress import Progress, TextColumn, BarColumn
+from rich.layout import Layout
+from rich.align import Align
+from rich import box
+from rich.table import Table
+
+# Al inicio del archivo, justo después de los imports:
+prev_disk = None
+prev_net = None
+prev_time = None
+
+def getkey(q):
+    old = termios.tcgetattr(sys.stdin)
+    tty.setcbreak(sys.stdin.fileno())
+    try:
+        while True:
+            b = os.read(sys.stdin.fileno(), 3).decode()
+            k = ord(b[2]) if len(b) == 3 else ord(b)
+            keymap = {127:'backspace',10:'return',32:'space',9:'tab',27:'esc',65:'up',66:'down',67:'right',68:'left'}
+            q.put(keymap.get(k, chr(k)))
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
+
+
+def read_npu_load():
+    try:
+        with open("/sys/kernel/debug/rknpu/load") as f:
+            text = f.read()
+        items = re.findall(r"Core(\d+):\s*(\d+)%", text)
+        return [int(pct) for _, pct in items]
+    except:
+        return []
+
+
+def get_cpu_usage():
+    return psutil.cpu_percent(percpu=True)
+
+
+def get_rk_model():
+    """
+    Detecta el modelo de SoC Rockchip leyendo la device tree.
+    Retorna algo como "RK3588" o "RK3399" si está disponible, 
+    o "Unknown RK" en caso contrario.
+    """
+    paths = [
+        "/proc/device-tree/model",
+        "/sys/firmware/devicetree/base/model"
+    ]
+    for p in paths:
+        if os.path.exists(p):
+            try:
+                # El fichero suele contener un string terminado en NUL
+                data = open(p, "rb").read().rstrip(b"\x00")
+                model = data.decode("ascii", errors="ignore")
+                # Buscar algo como "RKxxxx"
+                m = re.search(r"\b(RK\d+)\b", model, re.IGNORECASE)
+                if m:
+                    return m.group(1).upper()
+                return model
+            except:
+                continue
+    return "Unknown RK"
+
+def get_mem_info():
+    vm = psutil.virtual_memory()
+    sm = psutil.swap_memory()
+    return vm, sm
+
+
+def get_thermal():
+    temps = []
+    try:
+        for name, entries in psutil.sensors_temperatures().items():
+            if not entries or entries[0].current is None:
+                continue
+            label = name.replace("_thermal", "")
+            temps.append((label, math.floor(entries[0].current)))
+    except:
+        pass
+    return temps
+
+
+def human_bytes(val):
+    for unit in ['B','KB','MB','GB','TB']:
+        if val < 1024:
+            return f"{val:.1f} {unit}"
+        val /= 1024
+    return f"{val:.1f} PB"
+
+
+def get_cpu_clusters():
+    clusters, current, last = [], [], None
+    with open('/proc/cpuinfo') as f:
+        for line in f:
+            if line.startswith('processor'):
+                cpu = int(line.split(':')[1])
+                if last is not None and cpu != last + 1:
+                    clusters.append(current)
+                    current = []
+                current.append(cpu)
+                last = cpu
+    if current:
+        clusters.append(current)
+    return clusters
+
+def readkver():
+    """Lee la versión del driver del kernel de la NPU"""
+    try:
+        with open("/sys/kernel/debug/rknpu/version", "r") as f:
+            rkver = f.read()
+        return rkver.split(":")[1].strip()
+    except Exception as e:
+        print("No se puede leer /sys/kernel/debug/rknpu/version. Ejecuta con `sudo`.")
+        sys.exit(-2)
+
+def readlibver():
+    """Lee la versión de la biblioteca librknnrt"""
+    try:
+        output = subprocess.check_output(
+            'strings /usr/lib/librknnrt.so | grep "librknnrt version:"',
+            shell=True
+        )
+        ver = output.decode("utf-8").strip()
+        ver = ver.replace("librknnrt version: ", "")
+        ver = ver.replace("(", "\n").replace(")", "")
+        return ver
+    except Exception:
+        return "Desconocida"
+
+def read_gpu_usage():
+    """Lee el archivo de utilización de la GPU y calcula el porcentaje de uso."""
+    try:
+        with open("/sys/kernel/debug/mali0/dvfs_utilization", "r") as f:
+            line = f.readline()
+            # Extraer los valores de busy_time y idle_time
+            parts = line.strip().split()
+            times = {parts[i].rstrip(':'): int(parts[i + 1]) for i in range(0, len(parts), 2)}
+            busy_time = times.get("busy_time", 0)
+            idle_time = times.get("idle_time", 0)
+            total_time = busy_time + idle_time
+            if total_time == 0:
+                return 0.0
+            gpu_usage = (busy_time / total_time) * 100
+            return gpu_usage
+    except Exception as e:
+        print (f"Error al leer la GPU: {e}")
+        return 0.0  # Devuelve 0.0 en caso de error
+
+def get_top_processes(by="cpu", count=5):
+    """
+    Obtiene los procesos que más consumen CPU o memoria.
+    :param by: 'cpu' o 'memory' para ordenar.
+    :param count: número de procesos a mostrar.
+    :return: lista de diccionarios con información de procesos.
+    """
+    processes = []
+    for proc in psutil.process_iter(attrs=['pid', 'name', 'username']):
+        try:
+            with proc.oneshot():
+                cpu = proc.cpu_percent(interval=None)
+                mem = proc.memory_percent()
+                info = {
+                    'pid': proc.pid,
+                    'name': proc.name(),
+                    'user': proc.username(),
+                    'cpu': cpu,
+                    'mem': mem
+                }
+                processes.append(info)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    key = 'cpu' if by == 'cpu' else 'mem'
+    return sorted(processes, key=lambda p: p[key], reverse=True)[:count]
+
+def build_process_panel():
+    """
+    Construye un panel que muestra los procesos que más consumen CPU o memoria.
+    """
+    top_cpu = get_top_processes(by="cpu")
+    top_mem = get_top_processes(by="memory")
+
+    table = Table(title="Procesos Principales", box=box.ROUNDED, expand=True)
+    table.add_column("PID", style="cyan", justify="right")
+    table.add_column("Usuario", style="green")
+    table.add_column("Nombre", style="magenta")
+    table.add_column("CPU %", style="red", justify="right")
+    table.add_column("Mem %", style="blue", justify="right")
+
+    for proc in top_cpu:
+        table.add_row(
+            str(proc['pid']),
+            proc['user'],
+            proc['name'],
+            f"{proc['cpu']:.1f}",
+            f"{proc['mem']:.1f}"
+        )
+
+    return table
+
+def build_gpu_panel():
+    """Construye el panel de la GPU para rktop con una barra de progreso."""
+    gpu_usage = read_gpu_usage()
+    progress = Progress(
+        TextColumn("Mali0"),
+        BarColumn(bar_width=None),
+        TextColumn(f"{gpu_usage:.2f}%"),
+        expand=True,
+    )
+    progress.add_task("", total=100, completed=gpu_usage)
+    return Panel(progress, title="GPU", padding=(1,2), border_style="green", box=box.ROUNDED)
+
+
+def build_cpu_panel():
+    rk_model = get_rk_model()
+    clusters = get_cpu_clusters()
+    usage = get_cpu_usage()
+
+    # map CPU to its cluster index
+    cpu_to_cluster = {}
+    for idx, cluster in enumerate(clusters, start=1):
+        for cpu in cluster:
+            cpu_to_cluster[cpu] = idx
+
+    table = Table.grid(expand=True)
+    table.add_column()
+
+    # header with model
+    table.add_row(f"[bold]Rockchip SoC:[/bold] {rk_model}")
+    table.add_row("")
+
+    # render each CPU line with usage only
+    for cpu_id, u in enumerate(usage):
+        cluster_id = cpu_to_cluster.get(cpu_id, 0)
+        progress = Progress(
+            TextColumn(f"CPU {cpu_id}"),
+            BarColumn(bar_width=None),
+            TextColumn(f"{u:>3.0f}%"),
+            expand=True,
+        )
+        progress.add_task("", total=100, completed=u)
+        table.add_row(progress)
+
+    return Panel(table, title="CPU", padding=(1,2), border_style="cyan", box=box.ROUNDED)
+
+
+def build_npu_panel():
+    loads = read_npu_load()
+    if not loads:
+        return Panel("NPU no disponible", title="NPU", box=box.ROUNDED)
+    progress = Progress(
+        TextColumn("{task.description}"),
+        BarColumn(bar_width=None),
+        TextColumn("{task.percentage:>3.0f}%", style="yellow"),
+        expand=True,
+    )
+    for i, val in enumerate(loads):
+        progress.add_task(f"NPU Core {i}", total=100, completed=val)
+    return Panel(progress, title="NPU", padding=(1,2), box=box.ROUNDED)
+
+
+def build_mem_panel():
+    vm, sm = get_mem_info()
+    ram_info = f"{human_bytes(vm.used)} / {human_bytes(vm.total)}"
+    swap_info = f"{human_bytes(sm.used)} / {human_bytes(sm.total)}"
+    cached = human_bytes(getattr(vm, 'cached', 0))
+    shared = human_bytes(getattr(vm, 'shared', 0))
+    free = human_bytes(vm.available)
+    total = human_bytes(vm.total)
+    zused, ztot = '-', '-'
+    try:
+        with open('/sys/block/zram0/mm_stat') as f:
+            parts = f.read().split()
+            ztot = int(parts[3])
+            zused = int(parts[5])
+    except: pass
+    zram_info = f"{human_bytes(zused)} / {human_bytes(ztot)}"
+
+    details = (
+        f"[bold]Total:[/bold] {total}\n"
+        f"[bold]Libre:[/bold] {free}\n"
+        f"[bold]Caché:[/bold] {cached}\n"
+        f"[bold]Compartida:[/bold] {shared}\n"
+    )
+    progress = Progress(
+        TextColumn("{task.description}"),
+        BarColumn(bar_width=None),
+        TextColumn("{task.percentage:>3.0f}% [dim]| {task.fields[info]}", justify="right"),
+        expand=True,
+    )
+    progress.add_task("RAM", total=100, completed=vm.percent, info=ram_info)
+    progress.add_task("Swap", total=100, completed=sm.percent, info=swap_info)
+    # Añadimos ZRAM como tercera barra
+    zram_pct = (zused / ztot * 100) if ztot > 0 else 0
+    progress.add_task("ZRAM",  total=100, completed=zram_pct, info=zram_info)
+    return Panel(Group(progress, details), title="Memoria", padding=(1,2), box=box.ROUNDED)
+
+def build_io_table():
+    """Panel con I/O de disco y tráfico de red"""
+    global prev_disk, prev_net, prev_time
+    now = time.time()
+    disk = psutil.disk_io_counters()
+    net = psutil.net_io_counters()
+    if prev_time:
+        interval = now - prev_time
+        read_rate  = (disk.read_bytes  - prev_disk.read_bytes ) / interval
+        write_rate = (disk.write_bytes - prev_disk.write_bytes) / interval
+        rx_rate    = (net.bytes_recv  - prev_net.bytes_recv ) / interval
+        tx_rate    = (net.bytes_sent  - prev_net.bytes_sent ) / interval
+    else:
+        read_rate = write_rate = rx_rate = tx_rate = 0
+    prev_disk, prev_net, prev_time = disk, net, now
+
+    # Crear una tabla con estilo similar al panel de temperaturas
+    tbl = Table(title="I/O / Red", box=box.ROUNDED)
+    tbl.add_column("Métrica", style="cyan")
+    tbl.add_column("Valor", justify="right", style="magenta")
+    tbl.add_row("Disk Read", f"{human_bytes(read_rate)}/s")
+    tbl.add_row("Disk Write", f"{human_bytes(write_rate)}/s")
+    tbl.add_row("Network RX", f"{human_bytes(rx_rate)}/s")
+    tbl.add_row("Network TX", f"{human_bytes(tx_rate)}/s")
+
+    return tbl
+
+def build_thermal_table():
+    tbl = Table(title="Temperaturas", box=box.ROUNDED)
+    tbl.add_column("Sensor", style="cyan")
+    tbl.add_column("Temperatura", justify="right", style="magenta")
+    for name, val in get_thermal():
+        tbl.add_row(name, f"{val}°C")
+    return tbl
+
+def build_npu_version_table():
+    """Panel con información de versiones de NPU"""
+    # Obtener las versiones
+    rkver = readkver().strip()
+    libver = readlibver().strip()
+
+    tbl = Table(title="Versión de NPU", box=box.ROUNDED)
+    tbl.add_column("Componente", style="cyan")
+    tbl.add_column("Versión", justify="right", style="magenta")
+
+    tbl.add_row("Kernel NPU", rkver)
+    tbl.add_row("librknnrt", libver)
+
+    return tbl
+
+def build_layout():
+    layout = Layout()
+    layout.split(
+        Layout(name="title", size=3),
+        Layout(name="top", ratio=3),
+        Layout(name="middle", ratio=2),
+        Layout(name="bottom", ratio=2),
+    )
+    layout['top'].split_row(
+        Layout(name="left"), Layout(name="right"),
+    )
+    layout['bottom'].split_row(
+        Layout(name="left"),
+        Layout(name="center"),
+        Layout(name="right"),
+    )
+    layout['title'].update(
+        Align.center(Panel("[bold magenta]rktop - Monitor Rockchip[/bold magenta]", box=box.ROUNDED), vertical="middle")
+    )
+    layout['top']['left'].update(Group(build_cpu_panel(), build_gpu_panel()))
+    layout['top']['right'].update(Group(build_mem_panel(), build_npu_panel()))
+
+    layout['middle'].update(build_process_panel())
+
+    layout['bottom']['left'].update(build_thermal_table())
+    layout['bottom']['right'].update(build_npu_version_table())
+    layout['bottom']['center'].update(build_io_table())
+
+    return layout
+
+
+def main():
+    q = queue.Queue()
+    threading.Thread(target=getkey, args=(q,), daemon=True).start()
+    old = termios.tcgetattr(sys.stdin)
+    try:
+        with Live(build_layout(), refresh_per_second=1, screen=True) as live:
+            while True:
+                time.sleep(1)
+                live.update(build_layout())
+                if not q.empty() and q.get() in ['q','Q','esc']:
+                    break
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
+        os.system('stty sane')
+
+if __name__ == '__main__':
+    if os.geteuid() != 0:
+        print("Necesita permisos de root. Usa: sudo rktop")
+        sys.exit(1)
+    main()
