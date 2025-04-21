@@ -1,4 +1,4 @@
-# rknputop
+# rktop
 Simple top-like script for Rockhip NPUs on Linux
 
 ## Installing
@@ -26,9 +26,11 @@ If you followed quick install, just enter `sudo rktop` on your shell
 
 `sudo ./rktop`
 
-## Options
+## Proximamente
 
-Proximamente .....
+parameters for cli
+RGA support 
+hot keys for UI
 
 ## Screenshots
 
