@@ -104,9 +104,17 @@ def readlibver():
 
 def parseload(txt):
     res = []
-    items = re.findall("Core([0-9]+):\s*([0-9]+)%", txt)
-    for core, pct in items:
-        res.append(int(pct))
+
+    if "Core0:" in txt:
+        # multi core NPU
+        items = re.findall(r"Core\d+:\s*(\d+)%", txt)
+        for core, pct in items:
+            res.append(int(pct))
+    else:
+        # single core NPU
+        items = re.findall(r"NPU load:\s+(\d+)%", txt)    
+        for pct in items:
+            res.append(int(pct))
     return res
 
 
