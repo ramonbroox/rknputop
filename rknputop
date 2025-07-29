@@ -107,12 +107,12 @@ def parseload(txt):
 
     if "Core0:" in txt:
         # multi core NPU
-        items = re.findall(r"Core\d+:\s*(\d+)%", txt)
+        items = re.findall(r"Core(\d+):\s*(\d+)%", txt)
         for core, pct in items:
             res.append(int(pct))
     else:
         # single core NPU
-        items = re.findall(r"NPU load:\s+(\d+)%", txt)    
+        items = re.findall(r"NPU load:\s+(\d+)%", txt)
         for pct in items:
             res.append(int(pct))
     return res
