@@ -245,6 +245,14 @@ if __name__ == "__main__":
         action="store_true",
         help="Show the RGA load",
     )
+    parser.add_option(
+        "-d",
+        "--dark-mode",
+        dest="darkmode",
+        default=False,
+        action="store_true",
+        help="Enable dark mode",
+    )
     opts, _ = parser.parse_args()
 
     rkload = readload()
@@ -272,6 +280,11 @@ if __name__ == "__main__":
         if len(samples) > MAX_SAMPLES:
             samples.pop(0)
         plt.clf()
+
+        if opts.darkmode:
+            plt.canvas_color("black")
+            plt.axes_color("black")
+            plt.ticks_color("white")
 
         if opts.npuonly:
             if opts.npubars:
