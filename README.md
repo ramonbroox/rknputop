@@ -10,7 +10,7 @@ Debian/Ubuntu only (requires apt):
 ### Manual Install
 
 Required:
-`sudo pip install plotext psutil`
+`sudo pip3 install plotext psutil --break-system-packages`
 
 Then download (for example with `wget`)
 
